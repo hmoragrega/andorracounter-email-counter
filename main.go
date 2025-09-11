@@ -2,10 +2,12 @@ package main
 
 import (
 	"log"
+	"net/http"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -43,36 +45,63 @@ func main() {
 	setupLog(os.Getenv("LOG_LEVEL"))
 	defer slog.Sync()
 
-	timezone, err := time.LoadLocation(os.Getenv("TIMEZONE"))
-	exitOnError(err, "loading timezone")
-
-	imapServer := os.Getenv("GMAIL_IMAP")
-	imapUsername := os.Getenv("GMAIL_ACCOUNT")
-	imapPassword := os.Getenv("GMAIL_APP_PASS")
-	imapMailboxName := os.Getenv("GMAIL_MAILBOX")
+	var (
+		imapServer      = os.Getenv("GMAIL_IMAP")
+		imapUsername    = os.Getenv("GMAIL_ACCOUNT")
+		imapPassword    = os.Getenv("GMAIL_APP_PASS")
+		imapMailboxName = os.Getenv("GMAIL_MAILBOX")
+		timezone        = os.Getenv("TIMEZONE")
+		port            = os.Getenv("PORT")
+	)
+	location, err := time.LoadLocation(timezone)
+	if err != nil {
+		slog.Fatalf("loading TIMEZONE %q: %v", timezone, err)
+	}
 	if imapServer == "" {
 		imapServer = "imap.gmail.com:993"
 	}
 	if imapMailboxName == "" {
 		imapMailboxName = "MyLocation"
 	}
+	if port == "" {
+		port = "8080"
+	}
 	if imapUsername == "" || imapPassword == "" {
 		slog.Fatalf("Please set GMAIL_ACCOUNT and GMAIL_APP_PASS environment variables.")
 	}
 
-	res, err := countDays(imapServer, imapUsername, imapPassword, imapMailboxName, timezone, "Andorra", "Spain")
-	exitOnError(err, "counting emails")
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	r.Use(gin.Recovery())
 
-	for country, c := range res.Email {
-		slog.Debugf("Total Email Count: %s: %d", country, c)
-	}
-	for country, c := range res.Days {
-		slog.Infof("Final Day Count: %s: %d", country, c)
-	}
-}
+	r.GET("/api/health", func(c *gin.Context) {
+		_, closeImap, err := connectIMAP(imapServer, imapUsername, imapPassword, imapMailboxName)
+		if err != nil {
+			slog.Warnf("health check failed: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
+			return
+		}
+		closeImap()
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	r.GET("/api/count", func(c *gin.Context) {
+		res, err := countDays(imapServer, imapUsername, imapPassword, imapMailboxName, location, "Andorra", "Spain")
+		if err != nil {
+			slog.Warnf("countDays failed: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, res)
+	})
 
-func exitOnError(err error, context string) {
-	if err != nil {
-		slog.Fatalf("%s: %v", context, err)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		consoleCount(imapServer, imapUsername, imapPassword, imapMailboxName, location, "Andorra", "Spain")
+	}()
+
+	slog.Infof("listening on :%s", port)
+	if err := r.Run(":" + port); err != nil {
+		slog.Fatalf("listening on port %s: %v", port, err)
 	}
 }
