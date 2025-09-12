@@ -188,6 +188,7 @@ func updateAPI(
 					Day:     date,
 					Andorra: day.Andorra,
 					Spain:   day.Spain,
+					Note:    "[auto-updated from email]",
 				}
 			} else if current.Andorra != day.Andorra || current.Spain != day.Spain {
 				// join note with existing note if any
