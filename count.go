@@ -33,6 +33,39 @@ func countDays(server, user, pass, mailbox string, location *time.Location, coun
 	}
 	defer closeImap()
 
+	// LIST con channels
+	mailboxes := make(chan *imap.MailboxInfo, 50) // buffer opcional
+	listdone := make(chan error, 1)
+
+	go func() {
+		// root "", patrón "*" para todo
+		listdone <- c.List("", "*", mailboxes)
+	}()
+
+	var trashName string
+
+	for mb := range mailboxes {
+		slog.Debugf("Mailbox: %s  Attrs: %v", mb.Name, mb.Attributes)
+
+		for _, a := range mb.Attributes {
+			// algunos servidores no exponen constantes; compara con la cadena literal
+			if strings.EqualFold(a, `\Trash`) {
+				trashName = mb.Name
+			}
+		}
+	}
+
+	// Error final del LIST
+	if err := <-listdone; err != nil {
+		return res, fmt.Errorf("listing mailboxes: %w", err)
+	}
+
+	if trashName == "" {
+		trashName = "[Gmail]/Papelera" // valor por defecto si no se encuentra
+	}
+
+	slog.Info("Trash mailbox:", trashName)
+
 	// --- Search and fetch emails ---
 	seqNums, err := c.Search(imap.NewSearchCriteria())
 	if err != nil {
@@ -93,8 +126,8 @@ func countDays(server, user, pass, mailbox string, location *time.Location, coun
 				for _, country := range countries {
 					if strings.Contains(body, country) {
 						res.Emails[country]++
-						if dayMap[country][emailDate] == 0 {
-							dayMap[country][emailDate]++
+						dayMap[country][emailDate]++
+						if dayMap[country][emailDate] == 1 { // first email for this day
 							res.Days[country]++
 							slog.Debugf("Emails %s body: %s", emailFullDate, body)
 							slog.Debugf("%s day: %s [%d]", country, emailDate, res.Days[country])
@@ -104,17 +137,12 @@ func countDays(server, user, pass, mailbox string, location *time.Location, coun
 							// Delete this email
 							delSet := new(imap.SeqSet)
 							delSet.AddNum(msg.SeqNum)
-							item := imap.FormatFlagsOp(imap.AddFlags, true)
-							flags := []interface{}{imap.DeletedFlag}
-							if err := c.Store(delSet, item, flags, nil); err != nil {
-								slog.Errorf("Error deleting message %d: %v", msg.SeqNum, err)
-								continue
+
+							err = c.Move(delSet, trashName)
+							if err != nil {
+								slog.Errorf("Moving %s to %s: %w", emailDate, emailFullDate, err)
 							}
-							if err := c.Expunge(nil); err != nil {
-								slog.Errorf("Error expunging: %v", err)
-								continue
-							}
-							slog.Debugf("Deleted email %s (%d) body: %s", emailFullDate, msg.SeqNum, body)
+							slog.Debugf("Moved email %s (%d) to Trash body: %s", emailFullDate, msg.SeqNum, body)
 						}
 					}
 				}
