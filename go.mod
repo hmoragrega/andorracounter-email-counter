@@ -1,4 +1,4 @@
-module LocationCounter
+module github.com/hmoragrega/andorracounter-email-counter
 
 go 1.25
 
