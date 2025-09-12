@@ -121,7 +121,7 @@ func main() {
 		consoleCount(imapServer, imapUsername, imapPassword, imapMailboxName, location, countries...)
 		return
 	}
-	updateFlag = true
+
 	if updateFlag {
 		go updateAPI(ctx, dayApi, imapServer, imapUsername, imapPassword, imapMailboxName, location, countries...)
 	}
