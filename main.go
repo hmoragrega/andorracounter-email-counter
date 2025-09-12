@@ -202,6 +202,8 @@ func updateAPI(
 				} else {
 					slog.Infof("[CRON] Updated day %s: %+v", date, day)
 				}
+			} else {
+				slog.Debugf("[CRON] No updates needed for day %s", date)
 			}
 		}
 	}
