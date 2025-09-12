@@ -11,14 +11,16 @@ import (
 )
 
 type CountResult struct {
-	Days     map[string]int `json:"days"`
-	Emails   map[string]int `json:"emails"`
-	Warnings []string       `json:"warnings,omitempty"`
+	Days     map[string]int  `json:"days"`
+	Emails   map[string]int  `json:"emails"`
+	DaysMap  map[string]*Day `json:"daysMap"`
+	Warnings []string        `json:"warnings,omitempty"`
 }
 
 func countDays(server, user, pass, mailbox string, location *time.Location, countries ...string) (res CountResult, err error) {
 	res.Days = make(map[string]int)
 	res.Emails = make(map[string]int)
+	res.DaysMap = make(map[string]*Day)
 
 	dayMap := make(map[string]map[string]int)
 	for _, country := range countries {
@@ -35,11 +37,11 @@ func countDays(server, user, pass, mailbox string, location *time.Location, coun
 
 	// LIST con channels
 	mailboxes := make(chan *imap.MailboxInfo, 50) // buffer opcional
-	listdone := make(chan error, 1)
+	listDone := make(chan error, 1)
 
 	go func() {
 		// root "", patrón "*" para todo
-		listdone <- c.List("", "*", mailboxes)
+		listDone <- c.List("", "*", mailboxes)
 	}()
 
 	var trashName string
@@ -56,7 +58,7 @@ func countDays(server, user, pass, mailbox string, location *time.Location, coun
 	}
 
 	// Error final del LIST
-	if err := <-listdone; err != nil {
+	if err := <-listDone; err != nil {
 		return res, fmt.Errorf("listing mailboxes: %w", err)
 	}
 
@@ -104,7 +106,7 @@ func countDays(server, user, pass, mailbox string, location *time.Location, coun
 		}
 
 		emailTime := date.In(location)
-		emailDate := emailTime.Format("02 Jan 2006")
+		emailDate := emailTime.Format(time.DateOnly)
 		emailFullDate := emailTime.Format("02 Jan 2006 15:04:05 MST")
 
 		for {
@@ -129,6 +131,25 @@ func countDays(server, user, pass, mailbox string, location *time.Location, coun
 						dayMap[country][emailDate]++
 						if dayMap[country][emailDate] == 1 { // first email for this day
 							res.Days[country]++
+
+							if res.DaysMap[emailDate] == nil {
+								res.DaysMap[emailDate] = &Day{
+									Day:     emailDate,
+									Andorra: boolToInt(strings.ToLower(country) == "andorra"),
+									Spain:   boolToInt(strings.ToLower(country) == "spain"),
+								}
+							} else {
+								switch country {
+								case "andorra":
+									d := res.DaysMap[emailDate]
+									d.Andorra = 1
+									res.DaysMap[emailDate] = d
+								case "spain":
+									d := res.DaysMap[emailDate]
+									d.Spain = 1
+									res.DaysMap[emailDate] = d
+								}
+							}
 							slog.Debugf("Emails %s body: %s", emailFullDate, body)
 							slog.Debugf("%s day: %s [%d]", country, emailDate, res.Days[country])
 						}
@@ -169,4 +190,11 @@ func consoleCount(server, user, pass, mailbox string, location *time.Location, c
 	for country, c := range res.Days {
 		slog.Infof("Final Day Count: %s: %d", country, c)
 	}
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

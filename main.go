@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -37,10 +41,17 @@ func setupLog(logLevel string) {
 	slog = zap.New(core, zap.AddCaller(), zap.AddStacktrace(zapcore.ErrorLevel)).Sugar()
 }
 
-var countOnlyFlag bool
+var (
+	countOnlyFlag bool
+	updateFlag    bool
+)
 
 func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill, syscall.SIGTERM, syscall.SIGQUIT)
+	defer cancel()
+
 	flag.BoolVar(&countOnlyFlag, "count-only", false, "Run count once and exit")
+	flag.BoolVar(&updateFlag, "update", false, "Update days API")
 	flag.Parse()
 
 	// --- Load environment ---
@@ -58,6 +69,10 @@ func main() {
 		imapMailboxName = os.Getenv("GMAIL_MAILBOX")
 		timezone        = os.Getenv("TIMEZONE")
 		port            = os.Getenv("PORT")
+		apiUser         = os.Getenv("DAYS_API_USER")
+		apiPass         = os.Getenv("DAYS_API_PASS")
+		apiURL          = os.Getenv("DAYS_API")
+		countries       = []string{"Andorra", "Spain"}
 	)
 	location, err := time.LoadLocation(timezone)
 	if err != nil {
@@ -76,6 +91,8 @@ func main() {
 		slog.Fatalf("Please set GMAIL_ACCOUNT and GMAIL_APP_PASS environment variables.")
 	}
 
+	dayApi := NewDaysApi(apiURL, apiUser, apiPass)
+
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -91,7 +108,7 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 	r.GET("/api/count", func(c *gin.Context) {
-		res, err := countDays(imapServer, imapUsername, imapPassword, imapMailboxName, location, "Andorra", "Spain")
+		res, err := countDays(imapServer, imapUsername, imapPassword, imapMailboxName, location, countries...)
 		if err != nil {
 			slog.Warnf("countDays failed: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -99,14 +116,93 @@ func main() {
 		}
 		c.JSON(http.StatusOK, res)
 	})
-	countOnlyFlag = true
+
 	if countOnlyFlag {
-		consoleCount(imapServer, imapUsername, imapPassword, imapMailboxName, location, "Andorra", "Spain")
+		consoleCount(imapServer, imapUsername, imapPassword, imapMailboxName, location, countries...)
 		return
 	}
+	updateFlag = true
+	if updateFlag {
+		go updateAPI(ctx, dayApi, imapServer, imapUsername, imapPassword, imapMailboxName, location, countries...)
+	}
 
-	slog.Infof("listening on :%s", port)
-	if err := r.Run(":" + port); err != nil {
-		slog.Fatalf("listening on port %s: %v", port, err)
+	srv := &http.Server{
+		Addr:    ":" + port,
+		Handler: r,
+	}
+
+	go func() {
+		<-ctx.Done()
+		slog.Infof("shutting down server...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			slog.Errorf("server forced to shutdown: %v", err)
+		}
+	}()
+
+	slog.Infof("server listening on %s", srv.Addr)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		slog.Fatalf("listen: %s\n", err)
+	}
+}
+
+func updateAPI(
+	ctx context.Context,
+	api *DaysApi,
+	server, user, pass, mailbox string,
+	location *time.Location,
+	countries ...string,
+) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	slog.Infof("starting cron to update days API")
+
+	// trigger once immediately
+	once := make(chan struct{}, 1)
+	once <- struct{}{}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-once:
+		case <-ticker.C:
+		}
+
+		res, err := countDays(server, user, pass, mailbox, location, countries...)
+		if err != nil {
+			slog.Warnf("[CRON] countDays failed: %v", err)
+			continue
+		}
+
+		for date, day := range res.DaysMap {
+			current, err := api.GetDay(ctx, date)
+			if err != nil {
+				slog.Warnf("[CRON] GetDay %s failed: %v", date, err)
+				continue
+			}
+			if current == nil {
+				current = &Day{
+					Day:     date,
+					Andorra: day.Andorra,
+					Spain:   day.Spain,
+				}
+			} else if current.Andorra != day.Andorra || current.Spain != day.Spain {
+				// join note with existing note if any
+				current.Note = "[auto-updated from email] " + current.Note
+				current.Andorra = day.Andorra
+				current.Spain = day.Spain
+				slog.Infof("[CRON] Updated day %s: %+v", date, day)
+				continue
+				err := api.UpdateDay(ctx, *current)
+				if err != nil {
+					slog.Warnf("[CRON] UpdateDay %s failed: %v", date, err)
+				} else {
+					slog.Infof("[CRON] Updated day %s: %+v", date, day)
+				}
+			}
+		}
 	}
 }
