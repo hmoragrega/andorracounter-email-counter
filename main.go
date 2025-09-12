@@ -183,7 +183,9 @@ func updateAPI(
 				slog.Warnf("[CRON] GetDay %s failed: %v", date, err)
 				continue
 			}
+			var update bool
 			if current == nil {
+				update = true
 				current = &Day{
 					Day:     date,
 					Andorra: day.Andorra,
@@ -195,16 +197,17 @@ func updateAPI(
 				current.Note = "[auto-updated from email] " + current.Note
 				current.Andorra = day.Andorra
 				current.Spain = day.Spain
-				slog.Infof("[CRON] Updated day %s: %+v", date, day)
-				continue
+				update = true
+			} else {
+				slog.Debugf("[CRON] No updates needed for day %s", date)
+			}
+			if update {
 				err := api.UpdateDay(ctx, *current)
 				if err != nil {
 					slog.Warnf("[CRON] UpdateDay %s failed: %v", date, err)
 				} else {
 					slog.Infof("[CRON] Updated day %s: %+v", date, day)
 				}
-			} else {
-				slog.Debugf("[CRON] No updates needed for day %s", date)
 			}
 		}
 	}
