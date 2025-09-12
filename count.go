@@ -6,8 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/emersion/go-imap/v2"
-	"github.com/emersion/go-imap/v2/imapclient"
+	"github.com/emersion/go-imap"
 	"github.com/emersion/go-message/mail"
 )
 
@@ -21,11 +20,11 @@ func countDays(server, user, pass, mailbox string, location *time.Location, coun
 	res.Days = make(map[string]int)
 	res.Emails = make(map[string]int)
 
-	dayMap := make(map[string]map[string]bool)
+	dayMap := make(map[string]map[string]int)
 	for _, country := range countries {
 		res.Days[country] = 0
 		res.Emails[country] = 0
-		dayMap[country] = make(map[string]bool)
+		dayMap[country] = make(map[string]int)
 	}
 
 	c, closeImap, err := connectIMAP(server, user, pass, mailbox)
@@ -35,42 +34,33 @@ func countDays(server, user, pass, mailbox string, location *time.Location, coun
 	defer closeImap()
 
 	// --- Search and fetch emails ---
-	searchResult, err := c.Search(&imap.SearchCriteria{}, nil).Wait()
+	seqNums, err := c.Search(imap.NewSearchCriteria())
 	if err != nil {
 		return res, fmt.Errorf("searching emails: %w", err)
 	}
 
-	fetchOptions := &imap.FetchOptions{
-		BodySection: []*imap.FetchItemBodySection{{
-			Peek: true,
-		}},
-	}
-	fetchCmd := c.Fetch(searchResult.All, fetchOptions)
+	seqset := new(imap.SeqSet)
+	seqset.AddNum(seqNums...)
 
-	for {
-		msg := fetchCmd.Next()
+	section := &imap.BodySectionName{}
+	messages := make(chan *imap.Message, 100)
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Fetch(seqset, []imap.FetchItem{imap.FetchEnvelope, imap.FetchBody, imap.FetchFlags, imap.FetchUid, section.FetchItem()}, messages)
+	}()
+
+	for msg := range messages {
 		if msg == nil {
-			break
+			continue
 		}
-		var bodySectionData imapclient.FetchItemDataBodySection
-		ok := false
-		for {
-			item := msg.Next()
-			if item == nil {
-				break
-			}
-			bodySectionData, ok = item.(imapclient.FetchItemDataBodySection)
-			if ok {
-				break
-			}
-		}
-		if !ok {
-			res.Warnings = append(res.Warnings, fmt.Sprintf("FETCH command did not return body section for email: %v", msg.SeqNum))
+		r := msg.GetBody(section)
+		if r == nil {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("No body for message %d", msg.SeqNum))
 			slog.Warnf("FETCH command did not return body section for email: %v", msg.SeqNum)
 			continue
 		}
 
-		mr, err := mail.CreateReader(bodySectionData.Literal)
+		mr, err := mail.CreateReader(r)
 		if err != nil {
 			return res, fmt.Errorf("creating mail reader: %w", err)
 		}
@@ -103,11 +93,28 @@ func countDays(server, user, pass, mailbox string, location *time.Location, coun
 				for _, country := range countries {
 					if strings.Contains(body, country) {
 						res.Emails[country]++
-						if !dayMap[country][emailDate] {
-							dayMap[country][emailDate] = true
+						if dayMap[country][emailDate] == 0 {
+							dayMap[country][emailDate]++
 							res.Days[country]++
 							slog.Debugf("Emails %s body: %s", emailFullDate, body)
 							slog.Debugf("%s day: %s [%d]", country, emailDate, res.Days[country])
+						}
+
+						if dayMap[country][emailDate] > 5 {
+							// Delete this email
+							delSet := new(imap.SeqSet)
+							delSet.AddNum(msg.SeqNum)
+							item := imap.FormatFlagsOp(imap.AddFlags, true)
+							flags := []interface{}{imap.DeletedFlag}
+							if err := c.Store(delSet, item, flags, nil); err != nil {
+								slog.Errorf("Error deleting message %d: %v", msg.SeqNum, err)
+								continue
+							}
+							if err := c.Expunge(nil); err != nil {
+								slog.Errorf("Error expunging: %v", err)
+								continue
+							}
+							slog.Debugf("Deleted email %s (%d) body: %s", emailFullDate, msg.SeqNum, body)
 						}
 					}
 				}
@@ -115,8 +122,8 @@ func countDays(server, user, pass, mailbox string, location *time.Location, coun
 		}
 	}
 
-	if err := fetchCmd.Close(); err != nil {
-		return res, fmt.Errorf("closing fetch command: %w", err)
+	if err := <-done; err != nil {
+		return res, fmt.Errorf("fetching emails: %w", err)
 	}
 
 	return res, nil

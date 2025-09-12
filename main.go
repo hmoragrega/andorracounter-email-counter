@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"log"
 	"net/http"
 	"os"
@@ -36,7 +37,12 @@ func setupLog(logLevel string) {
 	slog = zap.New(core, zap.AddCaller(), zap.AddStacktrace(zapcore.ErrorLevel)).Sugar()
 }
 
+var countOnlyFlag bool
+
 func main() {
+	flag.BoolVar(&countOnlyFlag, "count-only", false, "Run count once and exit")
+	flag.Parse()
+
 	// --- Load environment ---
 	err := godotenv.Load()
 	if err != nil {
@@ -93,12 +99,11 @@ func main() {
 		}
 		c.JSON(http.StatusOK, res)
 	})
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
+	countOnlyFlag = true
+	if countOnlyFlag {
 		consoleCount(imapServer, imapUsername, imapPassword, imapMailboxName, location, "Andorra", "Spain")
-	}()
+		return
+	}
 
 	slog.Infof("listening on :%s", port)
 	if err := r.Run(":" + port); err != nil {

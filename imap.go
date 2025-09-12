@@ -3,18 +3,18 @@ package main
 import (
 	"fmt"
 
-	"github.com/emersion/go-imap/v2/imapclient"
+	"github.com/emersion/go-imap/client"
 )
 
-func connectIMAP(server, user, pass, mailbox string) (*imapclient.Client, func(), error) {
-	c, err := imapclient.DialTLS(server, &imapclient.Options{Dialer: nil})
+func connectIMAP(server, user, pass, mailbox string) (*client.Client, func(), error) {
+	c, err := client.DialTLS(server, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("dialing IMAP server %s: %w", server, err)
 	}
 
 	slog.Debug("connected to server")
 
-	err = c.Login(user, pass).Wait()
+	err = c.Login(user, pass)
 	if err != nil {
 		_ = c.Close()
 		return nil, nil, fmt.Errorf("logging in: %w", err)
@@ -22,15 +22,15 @@ func connectIMAP(server, user, pass, mailbox string) (*imapclient.Client, func()
 	slog.Debug("logged in successfully")
 	//defer c.Logout()
 
-	_, err = c.Select(mailbox, nil).Wait()
+	_, err = c.Select(mailbox, false)
 	if err != nil {
-		c.Logout()
+		_ = c.Logout()
 		_ = c.Close()
 		return nil, nil, fmt.Errorf("selecting mailbox %s: %w", mailbox, err)
 	}
 
 	return c, func() {
-		c.Logout()
+		_ = c.Logout()
 		_ = c.Close()
 	}, nil
 }
