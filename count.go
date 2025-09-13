@@ -139,7 +139,7 @@ func countDays(server, user, pass, mailbox string, location *time.Location, coun
 									Spain:   boolToInt(strings.ToLower(country) == "spain"),
 								}
 							} else {
-								switch country {
+								switch strings.ToLower(country) {
 								case "andorra":
 									d := res.DaysMap[emailDate]
 									d.Andorra = 1
